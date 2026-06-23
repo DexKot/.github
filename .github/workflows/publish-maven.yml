@@ -114,6 +114,30 @@ jobs:
             popd > /dev/null
           done
 
+      - name: Generate artifacts.json
+        run: |
+          cd maven-repo
+          echo "[" > artifacts.json
+          first=true
+          for metadata in $(find . -name "maven-metadata.xml" -not -path "./.git/*" | sort); do
+            dir="$(dirname "$metadata")"
+            group_id="$(grep -oPm1 '(?<=<groupId>)[^<]+' "$metadata" 2>/dev/null)" || continue
+            artifact_id="$(grep -oPm1 '(?<=<artifactId>)[^<]+' "$metadata" 2>/dev/null)" || continue
+            latest="$(grep -oPm1 '(?<=<latest>)[^<]+' "$metadata" 2>/dev/null)" || continue
+            mapfile -t all_versions < <(grep -oP '(?<=<version>)[^<]+' "$metadata" | sort -rV)
+            versions_json=$(printf '%s\n' "${all_versions[@]}" | sed 's/.*/"&"/' | paste -sd,)
+            type="aar"
+            if find "$dir/$latest" -name "*.jar" -not -name "*sources*" | grep -q . 2>/dev/null; then
+              type="jar"
+            fi
+            $first || echo "," >> artifacts.json
+            first=false
+            cat >> artifacts.json <<ENTRY
+          {"groupId":"${group_id}","artifactId":"${artifact_id}","latest":"${latest}","versions":[${versions_json}],"type":"${type}"}
+          ENTRY
+          done
+          echo "]" >> artifacts.json
+
       - name: Commit and push
         run: |
           cd maven-repo
