@@ -1,0 +1,6 @@
+{
+  "name": "DexKot Release (Android)",
+  "description": "Build, test, and publish an Android library to the DexKot Maven repository on tag push",
+  "iconName": "rocket",
+  "categories": ["continuous-deployment"]
+}

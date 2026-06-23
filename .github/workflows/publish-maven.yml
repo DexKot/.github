@@ -1,0 +1,142 @@
+name: Publish to Maven
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to publish (without v prefix, e.g. 1.2.0)'
+        required: true
+        type: string
+      java-version:
+        type: string
+        default: '17'
+    secrets:
+      APP_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Publish to staging directory
+        run: ./gradlew publishAllPublicationsToStagingRepository -Plib.version=${{ inputs.version }}
+
+      - name: Verify staging output
+        run: |
+          STAGING="build/staging-repo"
+          if [ ! -d "$STAGING" ]; then
+            echo "::error::Staging directory not found. Ensure your build.gradle.kts defines a 'staging' maven repository at build/staging-repo."
+            exit 1
+          fi
+          echo "=== Staged artifacts ==="
+          find "$STAGING" -type f | sort
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: dexkot
+          repositories: maven
+
+      - name: Clone maven repository
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/dexkot/maven.git" \
+            maven-repo
+
+      - name: Copy artifacts to maven repo
+        run: cp -r build/staging-repo/* maven-repo/
+
+      - name: Update maven-metadata.xml
+        run: |
+          STAGING="build/staging-repo"
+
+          find "$STAGING" -name "*.pom" | while read -r pom; do
+            version_dir="$(dirname "$pom")"
+            artifact_rel="$(dirname "$version_dir" | sed "s|^$STAGING/||")"
+            target_dir="maven-repo/$artifact_rel"
+
+            [ -d "$target_dir" ] || continue
+
+            # Derive groupId and artifactId from directory path
+            artifact_id="$(basename "$artifact_rel")"
+            group_id="$(dirname "$artifact_rel" | tr '/' '.')"
+
+            # Collect all version directories
+            mapfile -t versions < <(
+              find "$target_dir" -mindepth 1 -maxdepth 1 -type d \
+                -regex '.*/[0-9].*' -printf '%f\n' | sort -V
+            )
+
+            [ "${#versions[@]}" -gt 0 ] || continue
+
+            latest="${versions[-1]}"
+            timestamp="$(date -u +%Y%m%d%H%M%S)"
+
+            cat > "$target_dir/maven-metadata.xml" <<METADATA
+          <?xml version="1.0" encoding="UTF-8"?>
+          <metadata>
+            <groupId>${group_id}</groupId>
+            <artifactId>${artifact_id}</artifactId>
+            <versioning>
+              <latest>${latest}</latest>
+              <release>${latest}</release>
+              <versions>
+          $(for v in "${versions[@]}"; do echo "        <version>${v}</version>"; done)
+              </versions>
+              <lastUpdated>${timestamp}</lastUpdated>
+            </versioning>
+          </metadata>
+          METADATA
+
+            # Generate checksums
+            pushd "$target_dir" > /dev/null
+            md5sum maven-metadata.xml | cut -d' ' -f1 > maven-metadata.xml.md5
+            sha1sum maven-metadata.xml | cut -d' ' -f1 > maven-metadata.xml.sha1
+            sha256sum maven-metadata.xml | cut -d' ' -f1 > maven-metadata.xml.sha256
+            sha512sum maven-metadata.xml | cut -d' ' -f1 > maven-metadata.xml.sha512
+            popd > /dev/null
+          done
+
+      - name: Commit and push
+        run: |
+          cd maven-repo
+          git config user.name "dexkot-publisher[bot]"
+          git config user.email "dexkot-publisher[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          REPO="${{ github.event.repository.name }}"
+          git commit -m "publish: ${REPO} ${{ inputs.version }}"
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "Pushed successfully"
+              exit 0
+            fi
+            echo "::warning::Push failed (attempt ${attempt}/5), rebasing..."
+            git pull --rebase
+          done
+
+          echo "::error::Failed to push to dexkot/maven after 5 attempts"
+          exit 1

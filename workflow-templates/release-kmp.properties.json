@@ -1,0 +1,6 @@
+{
+  "name": "DexKot Release (KMP)",
+  "description": "Build, test, and publish a KMP library to Maven and as XCFramework on tag push",
+  "iconName": "rocket",
+  "categories": ["continuous-deployment"]
+}

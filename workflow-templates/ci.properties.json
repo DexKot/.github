@@ -1,0 +1,6 @@
+{
+  "name": "DexKot CI",
+  "description": "Build and test on push and PRs using the shared DexKot workflow",
+  "iconName": "checkmark",
+  "categories": ["continuous-integration"]
+}

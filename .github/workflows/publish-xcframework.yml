@@ -1,0 +1,119 @@
+name: Publish XCFramework
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version (without v prefix, e.g. 1.2.0)'
+        required: true
+        type: string
+      tag:
+        description: 'Git tag (with v prefix, e.g. v1.2.0)'
+        required: true
+        type: string
+      framework-name:
+        description: 'XCFramework base name (e.g. DexkotCore)'
+        required: true
+        type: string
+      gradle-task:
+        description: 'Gradle task to build the XCFramework'
+        required: false
+        type: string
+        default: 'assembleReleaseXCFramework'
+      java-version:
+        type: string
+        default: '17'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build XCFramework
+        run: ./gradlew ${{ inputs.gradle-task }} -Plib.version=${{ inputs.version }}
+
+      - name: Find XCFramework
+        id: find
+        run: |
+          XCF=$(find build -name "${{ inputs.framework-name }}.xcframework" -type d | head -1)
+          if [ -z "$XCF" ]; then
+            echo "::error::XCFramework not found: ${{ inputs.framework-name }}.xcframework"
+            exit 1
+          fi
+          echo "path=$XCF" >> "$GITHUB_OUTPUT"
+          echo "Found: $XCF"
+
+      - name: Package XCFramework
+        id: package
+        run: |
+          ZIP_NAME="${{ inputs.framework-name }}.xcframework.zip"
+          cd "$(dirname "${{ steps.find.outputs.path }}")"
+          zip -r -y "$GITHUB_WORKSPACE/$ZIP_NAME" "${{ inputs.framework-name }}.xcframework"
+          cd "$GITHUB_WORKSPACE"
+
+          CHECKSUM=$(sha256sum "$ZIP_NAME" | cut -d' ' -f1)
+          echo "zip=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+          echo "Checksum: $CHECKSUM"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" \
+            "${{ steps.package.outputs.zip }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.tag }}" \
+            --generate-notes \
+            2>/dev/null \
+          || gh release upload "${{ inputs.tag }}" \
+            "${{ steps.package.outputs.zip }}" \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+      - name: Update Package.swift
+        run: |
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/${{ steps.package.outputs.zip }}"
+          FRAMEWORK="${{ inputs.framework-name }}"
+          CHECKSUM="${{ steps.package.outputs.checksum }}"
+
+          cat > Package.swift <<SWIFT
+          // swift-tools-version:5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "${FRAMEWORK}",
+              platforms: [.iOS(.v15)],
+              products: [
+                  .library(name: "${FRAMEWORK}", targets: ["${FRAMEWORK}"])
+              ],
+              targets: [
+                  .binaryTarget(
+                      name: "${FRAMEWORK}",
+                      url: "${DOWNLOAD_URL}",
+                      checksum: "${CHECKSUM}"
+                  )
+              ]
+          )
+          SWIFT
+
+      - name: Commit Package.swift
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update Package.swift for ${{ inputs.tag }}"
+            git push origin HEAD:main
+          fi
